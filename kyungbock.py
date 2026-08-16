@@ -1573,16 +1573,6 @@ def page_greeting():
     tab1, tab2 = st.tabs(["🎓 학생회장단 인사말", "🏫 교장선생님 인사말"])
 
     with tab1:
-        st.markdown('<div class="bk-card">', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div style="height:120px;border-radius:12px;margin-bottom:16px;
-                        background:linear-gradient(135deg,{ORANGE} 0%, {ORANGE_DARK} 100%);
-                        display:flex;align-items:center;justify-content:center;color:white;font-size:44px;">
-                🎓
-            </div>
-            """, unsafe_allow_html=True,
-        )
         st.markdown(f"""
 안녕하세요, 경복고등학교 학생을 대표하는 학생회장단입니다.
 
@@ -1599,19 +1589,8 @@ def page_greeting():
 
 **경복고등학교 학생회장단 일동**
         """)
-        st.markdown('</div>', unsafe_allow_html=True)
 
     with tab2:
-        st.markdown('<div class="bk-card">', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div style="height:120px;border-radius:12px;margin-bottom:16px;
-                        background:linear-gradient(135deg,{NAVY} 0%, {BLUE_PILL} 100%);
-                        display:flex;align-items:center;justify-content:center;color:white;font-size:44px;">
-                🏫
-            </div>
-            """, unsafe_allow_html=True,
-        )
         st.markdown(f"""
 안녕하십니까, 경복고등학교장입니다.
 
@@ -1630,7 +1609,6 @@ def page_greeting():
 
 **경복고등학교장**
         """)
-        st.markdown('</div>', unsafe_allow_html=True)
 
     render_footer()
 
