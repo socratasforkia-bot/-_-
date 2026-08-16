@@ -445,7 +445,7 @@ header[data-testid="stHeader"] {{display: none;}}
 .bk-brand {{
     font-weight: 900;
     font-size: 17px;
-    color: white;
+    color: white !important;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -644,6 +644,7 @@ header[data-testid="stHeader"] {{display: none;}}
     font-weight: 900;
     margin: 4px 0 6px 0;
     line-height: 1.05;
+    color: white !important;
 }}
 .bk-hero .slogan {{
     font-size: 18px;
