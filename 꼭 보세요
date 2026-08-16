@@ -1,2 +1,0 @@
-pip install streamlit==1.48.1 supabase==2.18.1 streamlit-cookies-manager==0.2.0
-위에 거 cmd 복붙하세요
