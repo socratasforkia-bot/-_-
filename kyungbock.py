@@ -1333,10 +1333,17 @@ PUBLIC_PAGES = [
     ("공지사항", "📢", "notices"),
 ]
 
-# 페이지명 -> 슬러그 (bk-card-btn 링크 생성에 사용)
-SLUG_BY_NAME = {name: slug for (name, icon, slug) in PUBLIC_PAGES}
+# 사이드바(드로어) 메뉴에만 노출되는 페이지들.
+# PUBLIC_PAGES와 달리 메인 화면 상단 아이콘 메뉴(page_main의 icon_cols)에는
+# 넣지 않으므로, 여기에 추가한 페이지는 오직 햄버거 메뉴에서만 보입니다.
+DRAWER_ONLY_PAGES = [
+    ("인사말", "💌", "greeting"),
+]
 
-NAV_SLUGS = {slug: name for (name, icon, slug) in PUBLIC_PAGES}
+# 페이지명 -> 슬러그 (bk-card-btn 링크 생성에 사용)
+SLUG_BY_NAME = {name: slug for (name, icon, slug) in PUBLIC_PAGES + DRAWER_ONLY_PAGES}
+
+NAV_SLUGS = {slug: name for (name, icon, slug) in PUBLIC_PAGES + DRAWER_ONLY_PAGES}
 NAV_SLUGS.update({"login": "로그인", "mypage": "마이페이지", "admin": "관리자 페이지",
                    "booth_add": "부스 등록", "notice_add": "공지사항 등록", "logout": "__logout__"})
 
@@ -1363,6 +1370,11 @@ def render_topbar_and_drawer():
     for name, icon, slug in PUBLIC_PAGES:
         if name == "메인":
             continue
+        active = " bk-active" if ss.page == name else ""
+        links_html += f'<a class="bk-drawer-link{active}" href="?nav={slug}" target="_self">{icon} {name}</a>'
+
+    # 드로어 전용 페이지(예: 인사말)도 같은 방식으로 이어서 렌더링합니다.
+    for name, icon, slug in DRAWER_ONLY_PAGES:
         active = " bk-active" if ss.page == name else ""
         links_html += f'<a class="bk-drawer-link{active}" href="?nav={slug}" target="_self">{icon} {name}</a>'
 
@@ -1548,6 +1560,78 @@ def page_intro():
 **문의처**  {ss.site_info['phone']}
     """)
     st.markdown('</div>', unsafe_allow_html=True)
+    render_footer()
+
+
+# ----------------------------------------------------------------------
+# 페이지 : 인사말 (사이드바 전용 - 메인 화면 아이콘 메뉴에는 노출하지 않음)
+#   학생회장단 인사말 / 교장선생님 인사말을 탭으로 구분해 보여줍니다.
+# ----------------------------------------------------------------------
+def page_greeting():
+    st.markdown('<div class="bk-section-title">💌 인사말</div>', unsafe_allow_html=True)
+
+    tab1, tab2 = st.tabs(["🎓 학생회장단 인사말", "🏫 교장선생님 인사말"])
+
+    with tab1:
+        st.markdown('<div class="bk-card">', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div style="height:120px;border-radius:12px;margin-bottom:16px;
+                        background:linear-gradient(135deg,{ORANGE} 0%, {ORANGE_DARK} 100%);
+                        display:flex;align-items:center;justify-content:center;color:white;font-size:44px;">
+                🎓
+            </div>
+            """, unsafe_allow_html=True,
+        )
+        st.markdown(f"""
+안녕하세요, 경복고등학교 학생을 대표하는 학생회장단입니다.
+
+먼저 저희 **{FESTIVAL_NAME}**을 찾아주신 모든 분들께 진심으로 감사드립니다.
+이번 축제는 학생들이 오랜 시간 함께 고민하고 준비한 만큼, 공연·체험·전시 등
+다양한 프로그램을 통해 즐거운 추억을 만드실 수 있도록 최선을 다해 준비했습니다.
+
+학생들의 열정과 노력이 담긴 하루하루가 여러분께 즐거운 시간이 되기를 바라며,
+안전하고 즐거운 축제가 될 수 있도록 끝까지 함께해 주시면 감사하겠습니다.
+
+**"{FESTIVAL_SLOGAN}"** — 이 슬로건처럼, 우리 모두가 하나 되는 축제를 만들어가겠습니다.
+
+감사합니다.
+
+**경복고등학교 학생회장단 일동**
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with tab2:
+        st.markdown('<div class="bk-card">', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div style="height:120px;border-radius:12px;margin-bottom:16px;
+                        background:linear-gradient(135deg,{NAVY} 0%, {BLUE_PILL} 100%);
+                        display:flex;align-items:center;justify-content:center;color:white;font-size:44px;">
+                🏫
+            </div>
+            """, unsafe_allow_html=True,
+        )
+        st.markdown(f"""
+안녕하십니까, 경복고등학교장입니다.
+
+한 해 동안 학업에 정진해 온 우리 학생들이 그동안 갈고닦은 끼와 재능을
+마음껏 펼치는 뜻깊은 자리, **{FESTIVAL_NAME}**에 오신 것을 진심으로 환영합니다.
+
+이 축제는 학생들이 스스로 기획하고 준비하는 과정에서 협동과 배려, 그리고
+책임감을 배우는 소중한 교육의 장이기도 합니다. 학생, 학부모님, 그리고
+지역사회 여러분의 관심과 성원이 있었기에 오늘의 축제가 있을 수 있었습니다.
+
+앞으로도 학생들이 마음껏 꿈을 펼칠 수 있는 학교가 될 수 있도록
+교직원 모두 최선을 다하겠습니다. 축제 기간 동안 안전에 유의하시고,
+즐겁고 뜻깊은 시간 보내시기를 바랍니다.
+
+감사합니다.
+
+**경복고등학교장**
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+
     render_footer()
 
 
@@ -2271,7 +2355,7 @@ def main():
     routes = {
         "메인": page_main, "축제 안내": page_intro, "프로그램": page_programs,
         "시간표": page_schedule, "부스 정보": page_booths, "오시는 길": page_directions,
-        "공지사항": page_notices, "로그인": page_login,
+        "공지사항": page_notices, "인사말": page_greeting, "로그인": page_login,
         "마이페이지": page_mypage, "관리자 페이지": page_admin,
         "부스 등록": page_booth_add, "공지사항 등록": page_notice_add,
     }
