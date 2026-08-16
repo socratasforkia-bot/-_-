@@ -1,3 +1,0 @@
-streamlit
-supabase
-streamlit-cookies-manager
