@@ -6,8 +6,9 @@ Streamlit 기반 반응형 웹앱
 로그인 방식
     - 학생: 학번+이름 → (최초 1회) 학교이메일로 인증코드(OTP) 발송/확인 → 비밀번호 생성
             → 이후에는 학번+비밀번호로 로그인 (내부적으로 저장된 학교이메일로 인증)
-    - 교직원: 인증코드 → (최초 1회) 이름+비밀번호 생성 → 이후 코드+비밀번호로 로그인
-            (교직원은 실제 이메일이 없으므로 "코드 + 가짜 이메일"로 Supabase Auth 계정을 만듭니다)
+    - 교직원: 인증코드 → (최초 1회) 코드에 사전 등록된 이름 확인 + 아이디/비밀번호 생성
+            → 이후에는 아이디+비밀번호로 로그인
+            (교직원은 실제 이메일이 없으므로 "아이디 + 가짜 이메일"로 Supabase Auth 계정을 만듭니다)
 
 사전 준비 (필수)
     1) Supabase 프로젝트 SQL Editor에서 supabase_setup.sql 실행
@@ -97,6 +98,50 @@ render_topbar_and_drawer()에서 PUBLIC_PAGES를 순회할 때 이름이 "메인
 항목은 건너뛰고, bk-brand(로고) 부분을 <div>에서 <a href="?nav=home">로
 바꿔 클릭 시 메인으로 이동하도록 했습니다.
 ----------------------------------------------------------------------
+
+[수정 사항 6 - 교직원 로그인 방식 변경: 코드에 사전 등록된 이름 + 아이디/비밀번호]
+기존에는 교직원이 인증코드를 입력한 뒤 "본인이 직접" 이름을 타이핑해서
+계정을 만들고, 이후에도 계속 "코드+비밀번호"로 로그인해야 했습니다.
+요청에 따라 다음과 같이 바꿨습니다.
+
+    1) 관리자가 인증코드를 발급할 때 담당 선생님 "이름"도 함께 입력합니다
+       (staff_codes.name 컬럼). 그래서 선생님이 그 코드로 최초 등록할 때는
+       이름을 직접 입력하지 않고, 코드에 미리 저장된 이름이 자동으로
+       화면에 표시되고 그대로 프로필 이름으로 저장됩니다.
+    2) 선생님은 최초 등록 시 코드 확인 후 "아이디(로그인 ID)"와
+       "비밀번호"를 새로 만듭니다. 이 아이디+비밀번호 조합으로
+       Supabase Auth 계정(가짜 이메일: staffid-아이디@내부도메인)을 만듭니다.
+    3) 이후 로그인은 더 이상 "인증코드"가 아니라 "아이디+비밀번호"로 합니다.
+       (인증코드는 최초 1회, 본인 확인 및 이름 매칭 용도로만 사용됩니다.)
+
+DB 준비 (추가 SQL, Supabase SQL Editor에서 한 번 실행):
+
+    alter table staff_codes add column if not exists name text;
+    alter table profiles add column if not exists staff_username text unique;
+
+    (기존에 이미 등록된 교직원 계정이 있다면, staff_username이 비어있는 동안은
+     예전 방식의 "코드+비밀번호" 로그인이 통하지 않게 되므로, 필요하다면
+     관리자가 새 인증코드를 재발급해 다시 등록하도록 안내해주세요.)
+----------------------------------------------------------------------
+
+[수정 사항 7 - 부스 사진 + 아이콘 함께 표시]
+기존에는 부스에 사진을 등록하면 아이콘(이모티콘)은 화면에서 아예 보이지
+않고 사진만 표시됐습니다. 요청에 따라 사진이 있어도 아이콘이 사진 위
+모서리에 작은 배지 형태로 함께 보이도록 booth_media_html()을 수정했습니다.
+
+----------------------------------------------------------------------
+[수정 사항 8 - 공지사항/부스 목록 캐싱으로 체감 속도 개선 + DB 요청 절감]
+기존에는 메인 화면을 포함한 모든 페이지 렌더링마다 fetch_notices()/
+fetch_booths()가 매번 Supabase에 새로 요청을 보냈습니다. 방문자가 많아질수록
+(예: 축제 당일 수백~수천 명이 메인 화면을 새로고침) 완전히 동일한 데이터를
+반복해서 DB에 요청하게 되어 불필요하게 느려지고 DB 부하도 커집니다.
+
+해결: fetch_notices()/fetch_booths()에 @st.cache_data(ttl=...)를 적용해
+짧은 시간(각각 20초/30초) 동안은 캐시된 결과를 재사용하도록 했습니다.
+관리자가 등록/수정/삭제를 하면 즉시 .clear()로 캐시를 비워서, 관리자
+본인 화면에는 변경사항이 바로 반영되고, 그 외 방문자에게는 캐시 주기
+이내에 반영됩니다. (자세한 설명은 답변 텍스트를 참고하세요.)
+----------------------------------------------------------------------
 """
 
 import streamlit as st
@@ -122,8 +167,14 @@ FESTIVAL_DATE = date(2026, 10, 30)
 FESTIVAL_DATETIME = datetime.combine(FESTIVAL_DATE, dtime(0, 0, 0))
 FESTIVAL_TZ_OFFSET = "+09:00"  # 한국 표준시(KST) 기준
 
-# 학번/인증코드로 만드는 가짜 이메일 도메인 (Supabase Auth 내부용, 실제 발송 안 됨)
+# 학번/아이디로 만드는 가짜 이메일 도메인 (Supabase Auth 내부용, 실제 발송 안 됨)
 FAKE_EMAIL_DOMAIN = "bukakje.internal"
+
+# 공지사항/부스 목록 캐시 유지 시간(초). 방문자가 많을 때 DB 요청을 줄여
+# 체감 속도를 높이기 위한 값입니다. 값을 늘리면 DB 부하는 더 줄지만
+# 반영 지연은 늘어납니다.
+NOTICES_CACHE_TTL = 20
+BOOTHS_CACHE_TTL = 30
 
 # ----------------------------------------------------------------------
 # Supabase 클라이언트
@@ -236,7 +287,9 @@ def get_user_client() -> "Client":
 
 @st.cache_resource
 def get_admin_client():
-    """서비스 역할 키 클라이언트. RLS를 우회하므로 관리자 기능에서만 사용합니다."""
+    """서비스 역할 키 클라이언트. RLS를 우회하므로 관리자 기능에서만 사용합니다.
+    @st.cache_resource로 앱 전체에서 단 하나의 클라이언트 인스턴스를 재사용합니다
+    (요청마다 새로 만들지 않음 → 연결/초기화 비용 절감)."""
     if not SUPABASE_SERVICE_KEY:
         return None
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -246,8 +299,10 @@ def student_email(student_no: str) -> str:
     return f"student-{student_no.strip()}@{FAKE_EMAIL_DOMAIN}"
 
 
-def staff_email(code: str) -> str:
-    return f"staff-{code.strip()}@{FAKE_EMAIL_DOMAIN}"
+def staff_login_email(username: str) -> str:
+    """교직원 로그인 아이디로 Supabase Auth용 가짜 이메일을 만듭니다.
+    실제로 메일이 발송되지 않는 내부 전용 주소입니다."""
+    return f"staffid-{username.strip()}@{FAKE_EMAIL_DOMAIN}"
 
 
 # ----------------------------------------------------------------------
@@ -637,6 +692,25 @@ hr {{border-color: #E5E7EF;}}
 .bk-fab:hover {{
     background: {ORANGE_DARK};
 }}
+
+.bk-media-wrap {{
+    position: relative;
+    width: 100%;
+}}
+.bk-media-icon-badge {{
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: white;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+}}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -665,7 +739,7 @@ def init_state():
         ss.student_step = "check"   # check -> email_input -> otp_verify -> password_new
                                      #       -> (기존 학번) password_existing
     if "staff_step" not in ss:
-        ss.staff_step = "check"
+        ss.staff_step = "check"     # check -> account_new (최초 등록용, 코드 확인 단계)
 
     if "programs" not in ss:
         ss.programs = [
@@ -726,7 +800,8 @@ def go(page_name: str):
 def reset_login_steps():
     ss.student_step = "check"
     ss.staff_step = "check"
-    for k in ("pending_student_no", "pending_student_name", "pending_student_email", "pending_staff_code"):
+    for k in ("pending_student_no", "pending_student_name", "pending_student_email",
+              "pending_staff_code", "pending_staff_name"):
         ss.pop(k, None)
 
 
@@ -772,12 +847,20 @@ def is_admin():
 #   등록/수정/삭제는 서비스 키(SUPABASE_SERVICE_KEY)로 RLS를 우회해서
 #   처리합니다. 서비스 키가 없으면 일반 클라이언트로 시도하되, RLS에
 #   막혀 실패할 수 있습니다(그 경우 화면에 오류가 표시됩니다).
+#
+#   fetch_notices() / fetch_booths() 는 @st.cache_data로 짧게 캐싱합니다.
+#   같은 데이터를 모든 방문자가 반복해서 요청하는 상황(예: 축제 당일
+#   동시 접속자가 많을 때)에 DB 요청 수를 크게 줄여 체감 속도를 높이기
+#   위함입니다. 등록/수정/삭제 직후에는 해당 캐시를 .clear()로 즉시
+#   비워서, 변경한 관리자 화면에는 지연 없이 최신 데이터가 보이도록
+#   합니다.
 # ----------------------------------------------------------------------
 def _write_client():
     admin_client = get_admin_client()
     return admin_client if admin_client is not None else get_user_client()
 
 
+@st.cache_data(ttl=NOTICES_CACHE_TTL)
 def fetch_notices():
     client = get_user_client()
     try:
@@ -803,6 +886,7 @@ def add_notice(title: str, content: str, is_new: bool):
         _write_client().table("notices").insert(
             {"title": title, "content": content, "is_new": is_new}
         ).execute()
+        fetch_notices.clear()
         return True, "공지사항이 등록되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
@@ -813,6 +897,7 @@ def update_notice(notice_id, title: str, content: str, is_new: bool):
         _write_client().table("notices").update(
             {"title": title, "content": content, "is_new": is_new}
         ).eq("id", notice_id).execute()
+        fetch_notices.clear()
         return True, "공지사항이 수정되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
@@ -821,11 +906,13 @@ def update_notice(notice_id, title: str, content: str, is_new: bool):
 def delete_notice(notice_id):
     try:
         _write_client().table("notices").delete().eq("id", notice_id).execute()
+        fetch_notices.clear()
         return True, "공지사항이 삭제되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
 
 
+@st.cache_data(ttl=BOOTHS_CACHE_TTL)
 def fetch_booths():
     client = get_user_client()
     try:
@@ -855,6 +942,7 @@ def add_booth(data: dict):
             "hours": data["hours"], "description": data["desc"], "icon": data["icon"],
             "image": data.get("image"),
         }).execute()
+        fetch_booths.clear()
         return True, "부스가 등록되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
@@ -869,6 +957,7 @@ def update_booth(booth_id, data: dict):
         payload["image"] = data["image"]
     try:
         _write_client().table("booths").update(payload).eq("id", booth_id).execute()
+        fetch_booths.clear()
         return True, "부스 정보가 수정되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
@@ -877,6 +966,7 @@ def update_booth(booth_id, data: dict):
 def delete_booth(booth_id):
     try:
         _write_client().table("booths").delete().eq("id", booth_id).execute()
+        fetch_booths.clear()
         return True, "부스가 삭제되었습니다."
     except Exception as e:
         return False, _friendly_db_error(e)
@@ -885,22 +975,27 @@ def delete_booth(booth_id):
 # ----------------------------------------------------------------------
 # 부스 카드에 쓸 이미지 / 아이콘 영역 HTML
 #   - 사진이 있으면: 카드 폭에 꽉 차게, 둥근 모서리 + 그림자를 준
-#     비율 유지(object-fit: cover) 박스로 크게 보여줍니다.
+#     비율 유지(object-fit: cover) 박스로 크게 보여주고, 오른쪽 아래에
+#     흰 원형 배지로 대표 아이콘(이모티콘)을 함께 표시합니다.
+#     (사진과 아이콘을 동시에 볼 수 있도록)
 #   - 사진이 없으면: 대표 아이콘(이모티콘)을 큼직하게 그라데이션
 #     박스 안에 보여줘서 카드가 휑해 보이지 않게 합니다.
 #   메인 페이지 미리보기와 부스 정보 페이지에서 높이만 다르게 주고
 #   동일한 스타일을 공유합니다.
 # ----------------------------------------------------------------------
 def booth_media_html(b: dict, height: str = "150px") -> str:
+    icon = b.get("icon") or "🏪"
     if b.get("image"):
         return (
-            f'<div style="width:100%;height:{height};border-radius:14px;overflow:hidden;'
-            f'margin-bottom:10px;box-shadow:0 3px 12px rgba(15,31,61,0.15);">'
+            f'<div class="bk-media-wrap" style="height:{height};margin-bottom:10px;">'
+            f'<div style="width:100%;height:100%;border-radius:14px;overflow:hidden;'
+            f'box-shadow:0 3px 12px rgba(15,31,61,0.15);">'
             f'<img src="{b["image"]}" style="width:100%;height:100%;object-fit:cover;'
             f'display:block;">'
             f'</div>'
+            f'<div class="bk-media-icon-badge">{icon}</div>'
+            f'</div>'
         )
-    icon = b.get("icon") or "🏪"
     return (
         f'<div style="width:100%;height:{height};border-radius:14px;margin-bottom:10px;'
         f'background:linear-gradient(135deg,{NAVY} 0%, {BLUE_PILL} 100%);'
@@ -1125,6 +1220,9 @@ def student_signin(student_no: str, password: str):
 
 
 # ---------- 교직원 로그인/가입 ----------
+# 최초 1회: 관리자가 발급한 인증코드 확인 → 코드에 미리 등록된 이름을 그대로 사용
+#           → 본인이 원하는 "아이디"와 비밀번호를 새로 생성
+# 이후: 아이디 + 비밀번호로 로그인 (더 이상 인증코드를 쓰지 않음)
 def get_staff_code_info(code: str):
     client = get_user_client()
     try:
@@ -1135,11 +1233,33 @@ def get_staff_code_info(code: str):
     return res.data[0] if res.data else None
 
 
-def staff_signup(code: str, name: str, password: str):
+def staff_username_exists(username: str) -> bool:
+    client = get_user_client()
+    try:
+        res = (
+            client.table("profiles")
+            .select("id")
+            .eq("staff_username", username)
+            .execute()
+        )
+    except Exception as e:
+        st.error(_friendly_db_error(e))
+        st.stop()
+    return bool(res.data)
+
+
+def staff_signup(code: str, name: str, username: str, password: str):
+    """인증코드로 본인 확인 후, 코드에 사전 등록된 이름(name)을 그대로 프로필 이름으로
+    저장하고, 이후 로그인에 사용할 아이디(username)+비밀번호로 Supabase Auth 계정을
+    생성합니다."""
+    username = username.strip()
+    if staff_username_exists(username):
+        return False, "이미 사용 중인 아이디입니다. 다른 아이디를 입력해주세요."
+
     client = get_user_client()
     try:
         auth_res = client.auth.sign_up(
-            {"email": staff_email(code), "password": password}
+            {"email": staff_login_email(username), "password": password}
         )
     except Exception as e:
         return False, f"계정 생성에 실패했습니다: {e}"
@@ -1158,6 +1278,7 @@ def staff_signup(code: str, name: str, password: str):
         insert_client.table("profiles").insert({
             "id": user.id,
             "staff_code": code,
+            "staff_username": username,
             "name": name,
             "identity": "교직원",
             "is_admin": False,
@@ -1173,16 +1294,17 @@ def staff_signup(code: str, name: str, password: str):
     return True, "계정이 생성되고 로그인되었습니다."
 
 
-def staff_signin(code: str, password: str):
+def staff_signin(username: str, password: str):
+    """아이디 + 비밀번호로 로그인합니다 (최초 등록 이후의 일반적인 로그인 방식)."""
     client = get_user_client()
     try:
         auth_res = client.auth.sign_in_with_password(
-            {"email": staff_email(code), "password": password}
+            {"email": staff_login_email(username), "password": password}
         )
     except Exception:
-        return False, "인증코드 또는 비밀번호가 올바르지 않습니다."
+        return False, "아이디 또는 비밀번호가 올바르지 않습니다."
     if auth_res.user is None:
-        return False, "인증코드 또는 비밀번호가 올바르지 않습니다."
+        return False, "아이디 또는 비밀번호가 올바르지 않습니다."
     ss.current_user_id = auth_res.user.id
     ss.profile_cache = None
     # 새로고침 후에도 로그인이 유지되도록 세션 토큰을 쿠키에 저장합니다.
@@ -1526,7 +1648,7 @@ def page_booths():
                             new_icon = st.text_input(
                                 "아이콘(이모티콘)", value=b.get("icon") or "🏪",
                                 max_chars=8, key=f"bp_icon_{b['id']}",
-                                help="사진이 없을 때 대표로 표시되는 이모티콘입니다. 원하는 이모티콘을 붙여넣어보세요. 예: 🍔 🎮 🎨 🎵",
+                                help="사진을 등록해도 이 아이콘이 사진 위 배지로 함께 표시됩니다. 예: 🍔 🎮 🎨 🎵",
                             )
                             new_image = st.file_uploader(
                                 "부스 사진 교체 (선택, 비워두면 기존 사진 유지)",
@@ -1597,10 +1719,10 @@ def page_booth_add():
         bd = st.text_area("설명")
         b_icon = st.text_input(
             "아이콘(이모티콘)", value="🏪", max_chars=8,
-            help="사진을 등록하지 않으면 이 이모티콘이 대표 이미지로 표시됩니다. 원하는 이모티콘을 붙여넣어보세요. 예: 🍔 🎮 🎨 🎵 ☕",
+            help="사진을 등록해도 이 아이콘이 사진 위 배지로 함께 표시됩니다. 예: 🍔 🎮 🎨 🎵 ☕",
         )
         b_image = st.file_uploader(
-            "부스 사진 (선택, 등록하면 이모티콘 대신 사진이 크게 표시됩니다)",
+            "부스 사진 (선택, 등록하면 사진과 아이콘이 함께 표시됩니다)",
             type=["png", "jpg", "jpeg", "gif", "webp"], key="booth_add_page_image"
         )
         c1, c2 = st.columns(2)
@@ -1746,7 +1868,7 @@ def page_notice_add():
 
 
 # ----------------------------------------------------------------------
-# 페이지 : 로그인 / 인증  (학번·인증코드 + 비밀번호, Supabase Auth)
+# 페이지 : 로그인 / 인증  (학생: 학번+비밀번호 / 교직원: 아이디+비밀번호, Supabase Auth)
 # ----------------------------------------------------------------------
 def page_login():
     st.markdown('<div class="bk-section-title">🔐 로그인 / 인증</div>', unsafe_allow_html=True)
@@ -1868,67 +1990,83 @@ def page_login():
                     st.error(msg)
 
     # ---------------- 교직원 ----------------
+    # "최초 등록(인증코드)" 과 "로그인(아이디)" 을 하위 탭으로 분리했습니다.
+    # 최초 등록 시에는 이름을 직접 입력하지 않고, 관리자가 인증코드 발급 시
+    # 미리 입력해 둔 이름을 그대로 사용합니다. 등록이 끝나면 이후에는
+    # 인증코드가 아니라 이때 만든 "아이디+비밀번호"로 로그인합니다.
     with tab2:
-        if ss.staff_step == "check":
-            st.caption("미리 발급된 교직원 인증코드를 입력해주세요.")
-            with st.form("staff_check_form"):
-                code = st.text_input("인증코드", placeholder="예: BK26-A7Q9")
-                submitted = st.form_submit_button("다음", use_container_width=True)
-            if submitted:
-                code = code.strip()
-                info = get_staff_code_info(code)
-                if not info:
-                    st.error("존재하지 않는 인증코드입니다.")
-                elif not info["active"]:
-                    st.error("비활성화된 인증코드입니다.")
-                else:
-                    ss.pending_staff_code = code
-                    ss.staff_step = "password_existing" if info["used_by"] else "password_new"
-                    st.rerun()
+        staff_sub1, staff_sub2 = st.tabs(["🆕 최초 등록 (인증코드)", "🔑 로그인 (아이디)"])
 
-        elif ss.staff_step == "password_new":
-            st.success(f"인증코드 **{ss.pending_staff_code}**는 처음 사용됩니다. 이름과 비밀번호를 입력해주세요.")
-            with st.form("staff_signup_form"):
-                s_name = st.text_input("이름")
-                pw1 = st.text_input("비밀번호 (6자 이상)", type="password")
-                pw2 = st.text_input("비밀번호 확인", type="password")
-                c1, c2 = st.columns(2)
-                submit = c1.form_submit_button("계정 생성 및 로그인", use_container_width=True)
-                back = c2.form_submit_button("← 뒤로", use_container_width=True)
-            if back:
-                reset_login_steps(); st.rerun()
+        with staff_sub1:
+            if ss.staff_step == "check":
+                st.caption("미리 발급받은 교직원 인증코드를 입력해주세요. (최초 1회만 필요합니다)")
+                with st.form("staff_check_form"):
+                    code = st.text_input("인증코드", placeholder="예: BK26-A7Q9")
+                    submitted = st.form_submit_button("다음", use_container_width=True)
+                if submitted:
+                    code = code.strip()
+                    info = get_staff_code_info(code)
+                    if not info:
+                        st.error("존재하지 않는 인증코드입니다.")
+                    elif not info["active"]:
+                        st.error("비활성화된 인증코드입니다.")
+                    elif info.get("used_by"):
+                        st.error("이미 등록에 사용된 인증코드입니다. '로그인 (아이디)' 탭에서 아이디+비밀번호로 로그인해주세요.")
+                    else:
+                        preset_name = (info.get("name") or "").strip()
+                        if not preset_name:
+                            st.error("이 인증코드에는 담당 선생님 이름이 등록되어 있지 않습니다. 관리자에게 문의해주세요.")
+                        else:
+                            ss.pending_staff_code = code
+                            ss.pending_staff_name = preset_name
+                            ss.staff_step = "account_new"
+                            st.rerun()
+
+            elif ss.staff_step == "account_new":
+                st.success(f"인증코드 확인 완료 — **{ss.pending_staff_name}**님, 앞으로 로그인에 사용할 아이디와 비밀번호를 만들어주세요.")
+                with st.form("staff_signup_form"):
+                    s_username = st.text_input("아이디(로그인 ID)", placeholder="예: kimteacher")
+                    pw1 = st.text_input("비밀번호 (6자 이상)", type="password")
+                    pw2 = st.text_input("비밀번호 확인", type="password")
+                    c1, c2 = st.columns(2)
+                    submit = c1.form_submit_button("계정 생성 및 로그인", use_container_width=True)
+                    back = c2.form_submit_button("← 뒤로", use_container_width=True)
+                if back:
+                    reset_login_steps(); st.rerun()
+                if submit:
+                    if not s_username.strip():
+                        st.error("아이디를 입력해주세요.")
+                    elif len(pw1) < 6:
+                        st.error("비밀번호는 6자 이상이어야 합니다.")
+                    elif pw1 != pw2:
+                        st.error("비밀번호가 서로 일치하지 않습니다.")
+                    else:
+                        ok, msg = staff_signup(
+                            ss.pending_staff_code, ss.pending_staff_name, s_username, pw1,
+                        )
+                        if ok:
+                            reset_login_steps()
+                            st.success(msg)
+                            go("마이페이지"); st.rerun()
+                        else:
+                            st.error(msg)
+
+        with staff_sub2:
+            st.caption("이미 인증코드로 등록을 마치셨다면, 그때 만든 아이디+비밀번호로 로그인해주세요.")
+            with st.form("staff_signin_form"):
+                login_username = st.text_input("아이디")
+                pw = st.text_input("비밀번호", type="password")
+                submit = st.form_submit_button("로그인", use_container_width=True)
             if submit:
-                if not s_name:
-                    st.error("이름을 입력해주세요.")
-                elif len(pw1) < 6:
-                    st.error("비밀번호는 6자 이상이어야 합니다.")
-                elif pw1 != pw2:
-                    st.error("비밀번호가 서로 일치하지 않습니다.")
+                if not login_username.strip():
+                    st.error("아이디를 입력해주세요.")
                 else:
-                    ok, msg = staff_signup(ss.pending_staff_code, s_name.strip(), pw1)
+                    ok, msg = staff_signin(login_username.strip(), pw)
                     if ok:
                         reset_login_steps()
-                        st.success(msg)
                         go("마이페이지"); st.rerun()
                     else:
                         st.error(msg)
-
-        elif ss.staff_step == "password_existing":
-            st.write(f"인증코드 **{ss.pending_staff_code}** 계정의 비밀번호를 입력해주세요.")
-            with st.form("staff_signin_form"):
-                pw = st.text_input("비밀번호", type="password")
-                c1, c2 = st.columns(2)
-                submit = c1.form_submit_button("로그인", use_container_width=True)
-                back = c2.form_submit_button("← 뒤로", use_container_width=True)
-            if back:
-                reset_login_steps(); st.rerun()
-            if submit:
-                ok, msg = staff_signin(ss.pending_staff_code, pw)
-                if ok:
-                    reset_login_steps()
-                    go("마이페이지"); st.rerun()
-                else:
-                    st.error(msg)
 
     st.markdown('</div>', unsafe_allow_html=True)
     render_footer()
@@ -1973,7 +2111,12 @@ def page_mypage():
 
     st.markdown('<div class="bk-card">', unsafe_allow_html=True)
     st.markdown(f"### {'👑' if user['is_admin'] else ('🎓' if user['identity']=='학생' else '🧑‍🏫')} {user['name']}")
-    id_line = f"학번 {user['student_no']}" if user.get("student_no") else f"인증코드 {user.get('staff_code','-')}"
+    if user.get("student_no"):
+        id_line = f"학번 {user['student_no']}"
+    elif user.get("staff_username"):
+        id_line = f"아이디 {user['staff_username']}"
+    else:
+        id_line = f"인증코드 {user.get('staff_code','-')}"
     st.write(f"**신분**: {user['identity']} ({id_line})  ·  **관리자 권한**: {'있음 👑' if user['is_admin'] else '없음'}")
     st.markdown("---")
     mcols = st.columns(3)
@@ -2010,7 +2153,9 @@ def page_admin():
         st.subheader("사용자 목록")
         client = get_user_client()
         try:
-            res = client.table("profiles").select("id,name,identity,is_admin,student_no,staff_code").execute()
+            res = client.table("profiles").select(
+                "id,name,identity,is_admin,student_no,staff_code,staff_username"
+            ).execute()
             users = res.data or []
         except Exception as e:
             st.error(_friendly_db_error(e))
@@ -2019,6 +2164,7 @@ def page_admin():
             st.info("등록된 사용자가 없습니다.")
         else:
             rows = [{"ID": u["id"], "이름": u["name"], "신분": u["identity"],
+                     "학번/아이디": u.get("student_no") or u.get("staff_username") or "-",
                      "관리자": "✅" if u["is_admin"] else ""} for u in users]
             st.dataframe(rows, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -2062,22 +2208,9 @@ def page_admin():
             st.error(_friendly_db_error(e))
             codes = []
 
-        # 인증코드를 사용한 사람의 이름을 함께 보여주기 위해
-        # profiles 테이블에서 staff_code -> name 매핑을 만듭니다.
-        # (staff_codes 테이블 자체에는 이름이 없고 used_by(uid)만 있으므로,
-        #  profiles.staff_code 로 이어붙여서 이름을 찾습니다.)
-        try:
-            profile_res = client.table("profiles").select("staff_code,name").execute()
-            name_by_code = {
-                p["staff_code"]: p["name"]
-                for p in (profile_res.data or [])
-                if p.get("staff_code")
-            }
-        except Exception as e:
-            st.error(_friendly_db_error(e))
-            name_by_code = {}
-
-        rows = [{"인증코드": c["code"], "이름": name_by_code.get(c["code"], "-"),
+        # "담당자(사전 등록)"는 인증코드 발급 시 관리자가 미리 입력한 이름(staff_codes.name)입니다.
+        # 코드가 아직 등록에 사용되지 않았어도(=선생님이 아직 로그인 전이어도) 미리 확인할 수 있습니다.
+        rows = [{"인증코드": c["code"], "담당자(사전등록)": c.get("name") or "-",
                  "상태": "활성" if c["active"] else "비활성",
                  "사용여부": "사용됨" if c["used_by"] else "미사용"} for c in codes]
         st.dataframe(rows, use_container_width=True)
@@ -2086,10 +2219,19 @@ def page_admin():
             st.info("SUPABASE_SERVICE_KEY가 설정되면 인증코드 발급/비활성화를 사용할 수 있습니다.")
         else:
             import random, string
-            if st.button("➕ 새 인증코드 생성"):
-                new_code = "BK26-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-                admin_client.table("staff_codes").insert({"code": new_code, "active": True}).execute()
-                st.success(f"새 인증코드: {new_code}"); st.rerun()
+            st.markdown("**새 인증코드 발급**")
+            with st.form("staff_code_new_form"):
+                new_code_name = st.text_input("담당 선생님 이름", placeholder="예: 김철수")
+                gen_submit = st.form_submit_button("➕ 새 인증코드 생성", use_container_width=True)
+            if gen_submit:
+                if not new_code_name.strip():
+                    st.error("담당 선생님 이름을 입력해주세요. 최초 등록 시 이 이름이 자동으로 사용됩니다.")
+                else:
+                    new_code = "BK26-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+                    admin_client.table("staff_codes").insert(
+                        {"code": new_code, "name": new_code_name.strip(), "active": True}
+                    ).execute()
+                    st.success(f"새 인증코드: {new_code} (담당: {new_code_name.strip()})"); st.rerun()
             if codes:
                 target_code = st.selectbox("비활성화할 인증코드", ["선택 안함"] + [c["code"] for c in codes])
                 if target_code != "선택 안함" and st.button("인증코드 비활성화"):
