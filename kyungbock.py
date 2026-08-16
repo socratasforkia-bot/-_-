@@ -142,13 +142,57 @@ fetch_booths()가 매번 Supabase에 새로 요청을 보냈습니다. 방문자
 본인 화면에는 변경사항이 바로 반영되고, 그 외 방문자에게는 캐시 주기
 이내에 반영됩니다. (자세한 설명은 답변 텍스트를 참고하세요.)
 ----------------------------------------------------------------------
+
+[수정 사항 9 - 방명록 + 부스 필터/검색]
+참고한 축제 웹사이트 개발 후기(velog)에서 유저 리서치 결과 "방명록"이
+인기 기능으로 꼽혔던 점을 반영해 방명록 페이지를 추가했습니다. 로그인 없이
+누구나 이름+메시지를 남길 수 있고, 관리자만 삭제할 수 있습니다.
+또한 같은 글에서 "타임테이블과 부스 정보"가 가장 중요하다는 응답이 많았던
+점에 착안해 부스 정보 페이지에 카테고리 필터 + 이름 검색을 추가했습니다.
+
+DB 준비 (Supabase SQL Editor에서 한 번 실행):
+
+    create table if not exists guestbook (
+        id uuid primary key default gen_random_uuid(),
+        name text not null,
+        message text not null,
+        created_at timestamptz not null default now()
+    );
+    alter table guestbook enable row level security;
+    create policy "guestbook is viewable by everyone"
+        on guestbook for select using (true);
+    create policy "guestbook is writable by everyone"
+        on guestbook for insert with check (true);
+----------------------------------------------------------------------
+
+[수정 사항 10 - 관리자 방문자 통계]
+참고한 개발 후기에서 "개발자로서 이 프로젝트 최고의 선택은 관리자 백오피스에
+방문자 통계를 넣은 것"이라고 언급한 부분을 반영했습니다. 방문자가 사이트에
+처음 접속(세션당 1회)하면 조용히 방문 기록을 1건 남기고, 관리자 페이지에서
+누적 방문자 수와 최근 14일 일별 방문자 추이를 확인할 수 있습니다.
+개인을 특정할 수 있는 정보(IP, 쿠키 등)는 저장하지 않고 방문 시각만 기록합니다.
+
+DB 준비 (Supabase SQL Editor에서 한 번 실행):
+
+    create table if not exists visits (
+        id uuid primary key default gen_random_uuid(),
+        created_at timestamptz not null default now()
+    );
+    alter table visits enable row level security;
+    create policy "visits are insertable by everyone"
+        on visits for insert with check (true);
+    create policy "visits are viewable by everyone"
+        on visits for select using (true);
+    (조회 자체는 민감정보가 아니라 누구나 select 가능하게 열어뒀지만,
+     관리자 페이지 화면 자체는 관리자에게만 노출됩니다.)
+----------------------------------------------------------------------
 """
 
 import streamlit as st
 import streamlit.components.v1 as components
 import base64
 import io
-from datetime import datetime, date, time as dtime
+from datetime import datetime, date, time as dtime, timedelta
 from pathlib import Path
 
 try:
@@ -1007,6 +1051,133 @@ def delete_booth(booth_id):
 
 
 # ----------------------------------------------------------------------
+# 방명록 — Supabase 연동
+#   참고한 축제 웹사이트 개발 후기(velog)에서 유저 리서치 결과 "방명록"이
+#   축제를 즐긴 추억을 남기는 인기 기능으로 언급되어 추가했습니다.
+#   원 사례처럼 일반 방문자에게는 로그인을 요구하지 않고 누구나 자유롭게
+#   글을 남길 수 있게 했고, 비방/스팸성 글은 관리자가 삭제할 수 있습니다.
+#
+#   DB 준비 (Supabase SQL Editor에서 한 번 실행):
+#
+#       create table if not exists guestbook (
+#           id uuid primary key default gen_random_uuid(),
+#           name text not null,
+#           message text not null,
+#           created_at timestamptz not null default now()
+#       );
+#       alter table guestbook enable row level security;
+#       create policy "guestbook is viewable by everyone"
+#           on guestbook for select using (true);
+#       create policy "guestbook is writable by everyone"
+#           on guestbook for insert with check (true);
+#       (삭제는 SUPABASE_SERVICE_KEY로 RLS를 우회해 관리자만 처리하므로
+#        별도의 delete 정책은 필요 없습니다.)
+# ----------------------------------------------------------------------
+GUESTBOOK_CACHE_TTL = 15
+
+
+@st.cache_data(ttl=GUESTBOOK_CACHE_TTL)
+def fetch_guestbook():
+    client = get_user_client()
+    try:
+        res = (
+            client.table("guestbook")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+        )
+    except Exception as e:
+        st.error(_friendly_db_error(e))
+        return []
+    result = []
+    for row in (res.data or []):
+        created = row.get("created_at") or ""
+        result.append({
+            "id": row["id"],
+            "name": row.get("name") or "익명",
+            "message": row.get("message") or "",
+            "date": created[:16].replace("T", " ") if created else "",
+        })
+    return result
+
+
+def add_guestbook_entry(name: str, message: str):
+    try:
+        get_user_client().table("guestbook").insert(
+            {"name": name, "message": message}
+        ).execute()
+        fetch_guestbook.clear()
+        return True, "방명록에 글이 등록되었습니다."
+    except Exception as e:
+        return False, _friendly_db_error(e)
+
+
+def delete_guestbook_entry(entry_id):
+    try:
+        _write_client().table("guestbook").delete().eq("id", entry_id).execute()
+        fetch_guestbook.clear()
+        return True, "삭제되었습니다."
+    except Exception as e:
+        return False, _friendly_db_error(e)
+
+
+# ----------------------------------------------------------------------
+# 방문자 통계 — Supabase 연동
+#   브라우저 세션(탭)당 1회, 조용히 방문 기록을 남깁니다. 실패해도
+#   사이트 이용 자체에는 지장이 없도록 예외를 삼킵니다(try/except pass).
+#   IP나 쿠키 등 개인 식별 정보는 저장하지 않고 방문 시각만 남깁니다.
+# ----------------------------------------------------------------------
+VISIT_STATS_CACHE_TTL = 60
+
+
+def record_visit():
+    """세션당 1회만 방문 기록을 남깁니다. 관리자 통계용이며, 실패해도
+    조용히 넘어가서 일반 방문자의 이용 경험에는 영향을 주지 않습니다."""
+    if ss.get("visit_recorded"):
+        return
+    ss.visit_recorded = True  # 실패하더라도 매 rerun마다 재시도하지 않도록 먼저 표시
+    try:
+        get_user_client().table("visits").insert({}).execute()
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=VISIT_STATS_CACHE_TTL)
+def fetch_visit_total() -> int:
+    client = get_user_client()
+    try:
+        res = client.table("visits").select("id", count="exact").execute()
+        return res.count or 0
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=VISIT_STATS_CACHE_TTL)
+def fetch_visit_daily(days: int = 14) -> dict:
+    """최근 N일간 일별 방문자 수를 {'YYYY-MM-DD': 건수} 형태로 반환합니다."""
+    client = get_user_client()
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00")
+    try:
+        res = (
+            client.table("visits")
+            .select("created_at")
+            .gte("created_at", since)
+            .limit(20000)
+            .execute()
+        )
+    except Exception:
+        return {}
+    counts = {}
+    for row in (res.data or []):
+        created = row.get("created_at") or ""
+        day = created[:10]
+        if day:
+            counts[day] = counts.get(day, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+# ----------------------------------------------------------------------
 # 부스 카드에 쓸 이미지 / 아이콘 영역 HTML
 #   - 사진이 있으면: 카드 폭에 꽉 차게, 둥근 모서리 + 그림자를 준
 #     비율 유지(object-fit: cover) 박스로 크게 보여주고, 오른쪽 아래에
@@ -1364,7 +1535,7 @@ def logout():
 PUBLIC_PAGES = [
     ("메인", "🏠", "home"), ("축제 안내", "🎉", "intro"), ("프로그램", "🎤", "programs"),
     ("시간표", "📅", "schedule"), ("부스 정보", "🏪", "booths"), ("오시는 길", "📍", "directions"),
-    ("공지사항", "📢", "notices"),
+    ("공지사항", "📢", "notices"), ("방명록", "📝", "guestbook"),
 ]
 
 # 사이드바(드로어) 메뉴에만 노출되는 페이지들.
@@ -1710,10 +1881,31 @@ def page_booths():
     st.caption("부스 신청 기능은 제공하지 않으며, 운영 부스 정보만 안내합니다. (갤러리 기능 없음)")
 
     admin = is_admin()
-    booths = fetch_booths()
+    all_booths = fetch_booths()
 
-    if not booths:
+    # ------------------------------------------------------------
+    # 카테고리 필터 + 이름 검색
+    # 유저 리서치에서 "타임테이블과 부스 정보"가 가장 중요하게 꼽혔던 만큼,
+    # 부스가 많아져도 원하는 부스를 빠르게 찾을 수 있도록 필터/검색을 추가했습니다.
+    # ------------------------------------------------------------
+    fcol1, fcol2 = st.columns([1, 2])
+    with fcol1:
+        categories = ["전체"] + sorted({b["category"] for b in all_booths if b.get("category")})
+        selected_cat = st.selectbox("카테고리", categories, label_visibility="collapsed")
+    with fcol2:
+        keyword = st.text_input("부스 이름 검색", placeholder="🔍 부스 이름으로 검색", label_visibility="collapsed")
+
+    booths = all_booths
+    if selected_cat != "전체":
+        booths = [b for b in booths if b.get("category") == selected_cat]
+    if keyword.strip():
+        kw = keyword.strip().lower()
+        booths = [b for b in booths if kw in b["name"].lower()]
+
+    if not all_booths:
         st.info("아직 등록된 부스가 없습니다.")
+    elif not booths:
+        st.info("조건에 맞는 부스가 없습니다.")
     else:
         cols = st.columns(2)
         for i, b in enumerate(booths):
@@ -1963,6 +2155,67 @@ def page_notice_add():
                 st.error(msg)
 
     st.markdown('</div>', unsafe_allow_html=True)
+    render_footer()
+
+
+# ----------------------------------------------------------------------
+# 페이지 : 방명록
+#   로그인 없이 누구나 이름+메시지를 남길 수 있습니다. 비방/스팸성 글은
+#   관리자만 삭제할 수 있습니다(각 카드 아래 삭제 버튼은 관리자에게만 노출).
+# ----------------------------------------------------------------------
+def page_guestbook():
+    st.markdown('<div class="bk-section-title">📝 방명록</div>', unsafe_allow_html=True)
+    st.caption("로그인 없이 누구나 축제의 추억을 남길 수 있습니다. 서로 배려하는 글을 남겨주세요 :)")
+
+    admin = is_admin()
+
+    with st.form("guestbook_form", clear_on_submit=True):
+        gcol1, gcol2 = st.columns([1, 3])
+        with gcol1:
+            g_name = st.text_input("이름(닉네임)", placeholder="예: 2학년 홍길동", max_chars=30)
+        with gcol2:
+            g_msg = st.text_input("한마디 남기기", placeholder="축제 즐거웠어요! 🎉", max_chars=200)
+        submitted = st.form_submit_button("남기기", use_container_width=True)
+
+    if submitted:
+        if not g_msg.strip():
+            st.error("메시지를 입력해주세요.")
+        else:
+            ok, msg = add_guestbook_entry(g_name.strip() or "익명", g_msg.strip())
+            (st.success if ok else st.error)(msg)
+            if ok:
+                st.rerun()
+
+    st.markdown("---")
+
+    entries = fetch_guestbook()
+    if not entries:
+        st.info("아직 등록된 글이 없습니다. 첫 방명록을 남겨보세요!")
+    else:
+        for e in entries:
+            if admin:
+                ecol1, ecol2 = st.columns([9, 1])
+                with ecol1:
+                    st.markdown(
+                        f"<div style='padding:10px 0;border-bottom:1px solid #EEF0F5;'>"
+                        f"<b>{e['name']}</b> <span style='color:{MUTED};font-size:12px;'>{e['date']}</span>"
+                        f"<div style='margin-top:4px;'>{e['message']}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                with ecol2:
+                    if st.button("🗑️", key=f"gb_del_{e['id']}", help="삭제(관리자)"):
+                        ok, msg = delete_guestbook_entry(e["id"])
+                        (st.success if ok else st.error)(msg)
+                        if ok:
+                            st.rerun()
+            else:
+                st.markdown(
+                    f"<div style='padding:10px 0;border-bottom:1px solid #EEF0F5;'>"
+                    f"<b>{e['name']}</b> <span style='color:{MUTED};font-size:12px;'>{e['date']}</span>"
+                    f"<div style='margin-top:4px;'>{e['message']}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
     render_footer()
 
 
@@ -2245,7 +2498,7 @@ def page_admin():
     if admin_client is None:
         st.warning("`secrets.toml` 에 `SUPABASE_SERVICE_KEY` 가 없어 일부 관리 기능(권한 부여/회수, 인증코드 발급, 공지/부스 등록·수정·삭제)이 비활성화되어 있습니다.")
 
-    tabs = st.tabs(["🧑‍💻 사용자 관리", "🔑 권한 관리", "🔒 인증코드 관리"])
+    tabs = st.tabs(["🧑‍💻 사용자 관리", "🔑 권한 관리", "🔒 인증코드 관리", "📊 방문자 통계"])
 
     with tabs[0]:
         st.markdown('<div class="bk-card">', unsafe_allow_html=True)
@@ -2338,6 +2591,22 @@ def page_admin():
                     st.success("비활성화했습니다."); st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
+    with tabs[3]:
+        st.markdown('<div class="bk-card">', unsafe_allow_html=True)
+        st.subheader("방문자 통계")
+        st.caption("브라우저 세션(탭)당 1회 기록됩니다. IP 등 개인 식별 정보는 저장하지 않습니다.")
+
+        total = fetch_visit_total()
+        st.metric("누적 방문 수(세션 기준)", f"{total:,}")
+
+        daily = fetch_visit_daily(days=14)
+        if daily:
+            st.markdown("**최근 14일 일별 방문자 추이**")
+            st.bar_chart(daily)
+        else:
+            st.info("아직 최근 14일간의 방문 기록이 없습니다.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
     st.caption("📢 공지사항/부스 등록·수정·삭제는 '공지사항', '부스 정보' 메뉴 화면에서 직접 할 수 있습니다 "
                "(각 카드/항목 안에서 수정·삭제, 우측 하단 + 버튼으로 신규 등록).")
 
@@ -2364,14 +2633,15 @@ def render_footer():
 # 라우팅
 # ----------------------------------------------------------------------
 def main():
+    record_visit()
     handle_nav_query_param()
     render_topbar_and_drawer()
 
     routes = {
         "메인": page_main, "축제 안내": page_intro, "프로그램": page_programs,
         "시간표": page_schedule, "부스 정보": page_booths, "오시는 길": page_directions,
-        "공지사항": page_notices, "인사말": page_greeting, "로그인": page_login,
-        "마이페이지": page_mypage, "관리자 페이지": page_admin,
+        "공지사항": page_notices, "방명록": page_guestbook, "인사말": page_greeting,
+        "로그인": page_login, "마이페이지": page_mypage, "관리자 페이지": page_admin,
         "부스 등록": page_booth_add, "공지사항 등록": page_notice_add,
     }
 
